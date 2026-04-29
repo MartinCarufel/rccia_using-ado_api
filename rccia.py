@@ -6,12 +6,13 @@ from bs4 import BeautifulSoup
 from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.shared import Inches, Pt
+import os
 
 organization = "STMN-Group"
 project = "Data capturing Solutions ART"
 team = "SG1"
-#Enter your personal ADO token
-pat = ""
+#Enter your personal ADO token in user env variable, \> setx AZURE_DEVOPS_PAT "your_token_here"
+pat = os.getenv("AZURE_DEVOPS_PAT")
 planid = 2935   # Use Sirios Master library ID
 token = base64.b64encode(f":{pat}".encode()).decode()
 headers = {
