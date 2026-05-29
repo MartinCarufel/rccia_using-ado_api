@@ -1,3 +1,5 @@
+import logging
+
 import requests
 import base64
 import json
@@ -7,7 +9,7 @@ from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.shared import Inches, Pt
 import os
-import logging
+from logging_config import setup_logging
 
 organization = "STMN-Group"
 project = "Data capturing Solutions ART"
@@ -24,27 +26,29 @@ headers = {
 class Rccia:
 
     def __init__(self):
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.debug("Rccia initialized")
         self.test_case_xref = None
 
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.setLevel(logging.DEBUG)
+        # self.logger = logging.getLogger(self.__class__.__name__)
+        # self.logger.setLevel(logging.DEBUG)
         self.wit_wi_rel_tc = []
         self.wit_wi_tested_by = []
 
         # Prevent duplicate handlers if multiple objects are created
-        if not self.logger.handlers:
-            # Create file handler
-            file_handler = logging.FileHandler("robot.log", mode="w")
-
-            # Define log format
-            formatter = logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-            )
-
-            file_handler.setFormatter(formatter)
-
-            # Add handler to logger
-            self.logger.addHandler(file_handler)
+        # if not self.logger.handlers:
+        #     # Create file handler
+        #     file_handler = logging.FileHandler("robot.log", mode="w")
+        #
+        #     # Define log format
+        #     formatter = logging.Formatter(
+        #         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        #     )
+        #
+        #     file_handler.setFormatter(formatter)
+        #
+        #     # Add handler to logger
+        #     self.logger.addHandler(file_handler)
 
 
 
@@ -306,7 +310,10 @@ class Rccia:
 
 
 if __name__ == "__main__":
+    setup_logging()
+    logger = logging.getLogger(__name__)
     x = Rccia()
+    logger.info("Start MAIN")
     x.check_azure_devops_auth()
     # Step 1 - Create cross-reference between TC ADO work item ID to a corresponding Test spec ETQ number
     test_suite_list = x.get_test_suite_id_listing("Verification")
