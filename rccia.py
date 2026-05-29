@@ -7,6 +7,7 @@ from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.shared import Inches, Pt
 import os
+import logging
 
 organization = "STMN-Group"
 project = "Data capturing Solutions ART"
@@ -23,7 +24,51 @@ headers = {
 class Rccia:
 
     def __init__(self):
-        self.test_case_xref = {}
+        self.test_case_xref = None
+
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.setLevel(logging.DEBUG)
+        self.wit_wi_rel_tc = []
+        self.wit_wi_tested_by = []
+
+        # Prevent duplicate handlers if multiple objects are created
+        if not self.logger.handlers:
+            # Create file handler
+            file_handler = logging.FileHandler("robot.log", mode="w")
+
+            # Define log format
+            formatter = logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            )
+
+            file_handler.setFormatter(formatter)
+
+            # Add handler to logger
+            self.logger.addHandler(file_handler)
+
+
+
+    def check_azure_devops_auth(self):
+        pat = os.getenv("AZURE_DEVOPS_PAT")
+        print(pat)
+        if not pat:
+            raise Exception("PAT not found in environment variables")
+
+        auth = base64.b64encode(f":{pat}".encode()).decode()
+        url = f"https://dev.azure.com/{organization}/_apis/projects?api-version=7.1"
+        headers = {
+            "Authorization": f"Basic {auth}"
+        }
+
+        response = requests.get(url, headers=headers)
+
+        if response.status_code == 200:
+            print("Authentication successful")
+            return True
+        elif response.status_code == 401:
+            raise Exception("Authentication failed: Invalid PAT")
+        else:
+            raise Exception(f"Unexpected error: {response.status_code} - {response.text}")
 
     def get_test_suite_doc_number(self, test_suite_id):
         """
@@ -61,6 +106,7 @@ class Rccia:
         parent_test_suite_list = []
         leaf_test_suite = []
         for ts in json_response["value"]:
+            self.logger.info(f"Create xref for {ts["id"]} - {ts["name"]}")
             try:
                 if ts["parentSuite"]["name"] == ver_or_val:  # Check level 1 test suite if parent is under the parameter
                     test_suite_list.append(ts["id"])         # add the test suite id to a list
@@ -90,14 +136,17 @@ class Rccia:
                                                         Word Document test case ID TCxxxxx]
         :param list_of_test_suite: Table, list of test suite id
         """
+        xref = {}
         print("Processing: ", end="")
         for test_suite in list_of_test_suite:
             print(".", end="")
+            self.logger.info(f"Processing test case ID corresponding ETQ of test suite {test_suite}")
             test_case_list = self.get_test_case_id_list2(test_suite)
             for test_case in test_case_list:
-                self.test_case_xref[test_case] = [self.get_test_suite_doc_number(test_suite),
+                xref[test_case] = [self.get_test_suite_doc_number(test_suite),
                                                   self.get_test_case_TCid(test_case)]
         print("")
+        return xref
 
     def get_test_case_id_list2(self, test_suite):
         """
@@ -129,40 +178,27 @@ class Rccia:
         url = (f"https://dev.azure.com/{organization}/{project}/{team}/_apis/wit/wiql?api-version=7.0")
         body = {
             "query": """
-    SELECT
-        [System.Id],
-        [System.Title],
-        [System.WorkItemType]
-    FROM WorkItemLinks
-    WHERE
-        (
-            [Source].[System.WorkItemType] IN ('Story', 'Bug')
-            AND [Source].[System.IterationPath] UNDER 'Data capturing Solutions ART\\PI-2 2026'
-        )
-        AND
-        (
-            [System.Links.LinkType] = 'Microsoft.VSTS.Common.TestedBy-Forward'
-        )
-        AND
-        (
-            [Target].[System.WorkItemType] = 'Test Case'
-            AND [Target].[System.Tags] CONTAINS 'Verification'
-        )
-    MODE (MustContain)
-    """
-        }
+            SELECT      [System.Id], [System.Title],  [System.WorkItemType],  [System.State]      
+            FROM WorkItems    
+            WHERE  (  [System.WorkItemType] IN ('Story', 'Bug')            
+            AND [Custom.ProductVersion] = '1.0.8'            
+            AND [System.State] in ('Done','Close'        ))"""
+                }
 
         resp = requests.post(url, headers=headers, json=body)
         resp.raise_for_status()
         data = resp.json()
+        self.logger.info(f"Get the query result")
         workitem_id = []
-        for item in data["workItemRelations"]:
+        for item in data["workItems"]:
             # return only bug or story
-            if item["rel"] == None:
-                workitem_id.append(item["target"]["id"])
+            if item["id"] != None:
+                workitem_id.append(item["id"])
+        self.logger.info(f"The WIQL query found following WI list {workitem_id}")
         return workitem_id
 
     def get_workitem_details(self, workitem):
+        self.logger.info(f"Processing WIT {workitem}")
         url = (
             f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/{workitem}?$expand=Relations&api-version=7.0")
         resp = requests.get(url, headers=headers)
@@ -173,6 +209,7 @@ class Rccia:
         :param jsondata:
         :return: list
         """
+        self.logger.info(f"Initiate tested by for {jsondata["id"]}")
         test_by_TC_id_list = []
         try:
             for relation in jsondata["relations"]:
@@ -183,6 +220,9 @@ class Rccia:
                     # it will be added to the tested by list
                     if workitem_detail["fields"]["System.Tags"].lower() == "verification":
                         test_by_TC_id_list.append(int(workitem_id))
+                        self.logger.info(f"The WIT {jsondata["id"]} have tested by")
+                        if jsondata["id"] not in self.wit_wi_tested_by:
+                            self.wit_wi_tested_by.append(jsondata["id"])
                     else:
                         # print(f"test case {workitem_id} is not verification")
                         pass
@@ -191,19 +231,54 @@ class Rccia:
         return test_by_TC_id_list
 
     def get_impact_analysis(self, jsondata):
-        return BeautifulSoup(jsondata["fields"]["Custom.ImpactAnalysis"], "html.parser").get_text(
+
+        try:
+            text = BeautifulSoup(jsondata["fields"]["Custom.ImpactAnalysis"], "html.parser").get_text(
             separator=" ", strip=True)
+
+            self.log_wit_with_rel_tc(text, int(jsondata["id"]))
+
+            return text
+        except:
+            return "This Field is empty in ADO"
+
+    def log_wit_with_rel_tc(self, text, wit_id):
+        pattern = r"RelatedTC_Start(.*?)RelatedTC_Stop"
+        c_pattern = [r"TC\d{5}", r"UC\d{5}", r"DEV-\d{6-7}"]
+
+
+        match = re.search(pattern, text, re.DOTALL)
+
+        if match:
+            extracted_text = match.group(1).strip()
+            for patt in c_pattern:
+                tc_match = re.search(patt, extracted_text)
+                if tc_match:
+                    if wit_id not in self.wit_wi_rel_tc:
+                        self.wit_wi_rel_tc.append(wit_id)
+
+
 
     def get_change_log(self, jsondata):
-        return BeautifulSoup(jsondata["fields"]["Custom.ChangelogEntry_fullText"], "html.parser").get_text(
+        try:
+            return BeautifulSoup(jsondata["fields"]["Custom.ChangelogEntry_fullText"], "html.parser").get_text(
             separator=" ", strip=True)
+
+        except:
+            return "This Field is empty in ADO"
+
 
     def get_title(self, jsondata):
-        return BeautifulSoup(jsondata["fields"]["System.Title"], "html.parser").get_text(
+
+        try:
+            return BeautifulSoup(jsondata["fields"]["System.Title"], "html.parser").get_text(
             separator=" ", strip=True)
 
+        except:
+            return "This Field is empty in ADO"
+
     def get_tc_corresponding_spec_etq_number(self, test_case_id):
-        doc_number = self.test_case_xref[int(test_case_id)][0]
+        doc_number = self.test_case_xref[str(test_case_id)][0]
         return doc_number
 
     def formating_affecting_doc(self, tested_by_list):
@@ -217,11 +292,11 @@ class Rccia:
         for tc in tested_by_list:
             try:
                 tc_list = doc_list[self.get_tc_corresponding_spec_etq_number(tc)]
-                tc_list.append(self.test_case_xref[tc][1])
+                tc_list.append(self.test_case_xref[str(tc)][1])
                 doc_list[self.get_tc_corresponding_spec_etq_number(tc)] = tc_list
 
             except:
-                doc_list[self.get_tc_corresponding_spec_etq_number(tc)] = [self.test_case_xref[tc][1]]
+                doc_list[self.get_tc_corresponding_spec_etq_number(tc)] = [self.test_case_xref[str(tc)][1]]
         text = []
         for doc, tcs in doc_list.items():
             tcs.sort()
@@ -232,10 +307,18 @@ class Rccia:
 
 if __name__ == "__main__":
     x = Rccia()
-
+    x.check_azure_devops_auth()
     # Step 1 - Create cross-reference between TC ADO work item ID to a corresponding Test spec ETQ number
     test_suite_list = x.get_test_suite_id_listing("Verification")
-    x.create_xref_test_case_id_corresponding_etq_doc_number(test_suite_list)
+    create_xref = False   # True or false
+
+    if create_xref:
+        with open("xref.json", "w") as file:
+            json.dump(x.create_xref_test_case_id_corresponding_etq_doc_number(test_suite_list),
+                      file, indent=4)
+
+    with open("xref.json", mode='r') as file:
+        x.test_case_xref = json.load(file)
 
     # Step 2 - Get the list of all story and bug in the release
     iteration_workitem_list = x.get_wiql_query_result()
@@ -245,7 +328,7 @@ if __name__ == "__main__":
     # WI change description and write it in the file
     # WI Impact analysis and write it in the file
     # WI Testby test case list ADO id
-    # Associated test spec ETW doc number of each WI related TC
+    # Associated test spec ETQ doc number of each WI related TC
 
     with open("export_rccia.csv", mode='w', encoding='UTF-8') as f:
         f.write(f"Issue tracker,Title,Change description,Impact analysis,Affected documents\n")
@@ -292,7 +375,10 @@ if __name__ == "__main__":
                 for run in paragraph.runs:
                     run.font.name = 'Arial'
                     run.font.size = Pt(9)
-
+    print("This is the list of WIT that have TC in related TC but not link tested By")
+    for wit in x.wit_wi_rel_tc:
+        if wit not in x.wit_wi_tested_by:
+            print(f"{wit}, ", end="")
     doc.save("export_rccia.docx")
 
 
