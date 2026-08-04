@@ -282,7 +282,11 @@ class Rccia:
             return "This Field is empty in ADO"
 
     def get_tc_corresponding_spec_etq_number(self, test_case_id):
-        doc_number = self.test_case_xref[str(test_case_id)][0]
+        try:
+            doc_number = self.test_case_xref[str(test_case_id)][0]
+        except KeyError:
+            doc_number = f"Fail to retrieved {test_case_id}"
+            self.logger.error(f"Fail to retrieved {test_case_id}")
         return doc_number
 
     def formating_affecting_doc(self, tested_by_list):
